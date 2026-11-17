@@ -1,0 +1,7 @@
+precondition = ["Platform"]
+callsign = "HelloWorld"
+autostart = "@PLUGIN_HELLOWORLD_AUTOSTART@"
+startuporder = "@PLUGIN_HELLOWORLD_STARTUPORDER@"
+
+configuration = JSON()
+configuration.add("greeting", "@PLUGIN_HELLOWORLD_GREETING@")

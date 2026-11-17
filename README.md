@@ -1,23 +1,35 @@
 # Your first Thunder plugin: a guided journey
 
-Last updated: 2026-11-11
+Last updated: 2026-11-17
 
 Welcome to the OORO TV team. This guide takes you from "what is Thunder?" to a
 working plugin of your own, running on the TV and answering calls from the UI.
 Along the way you'll see how the pieces of the system fit together.
 
-You will build **HelloWorld**, a small but complete plugin that:
+You will build the same small plugin in the two ways Thunder supports:
 
-- answers a method call: `sayHello {"name":"Mahmoud"}` → `"Hello, Mahmoud!"`
-- keeps state you can read and change: `getGreeting`, `setGreeting`
-- sends an event to listeners: `onGreeted`
-- reads its default greeting from its configuration file
+1. **HelloWorld, in-process** (Stops 5–15). The plugin code runs inside the
+   `WPEFramework` process. This is the simplest kind of plugin.
+2. **HelloWorldOOP, out-of-process** (Stop 17). The same API, but the work
+   runs in a separate `WPEProcess`, connected to `WPEFramework` over COM-RPC.
 
-> **Status of the code in this guide.** Every file below was built with
-> `bitbake lib32-helloworld-plugin` against Thunder R4.2 in
-> `/home/rdkuser/OROO-6.5.0` on 2026-11-11: it compiled with no warnings, and the
-> generated `HelloWorld.json` is shown in Stop 11. It has not yet been run on a
-> TV, so Stops 12–14 describe the expected results.
+Both versions:
+
+- answer a method call: `sayHello {"name":"Mahmoud"}` → `"Hello, Mahmoud!"`
+- keep state you can read and change: `getGreeting`, `setGreeting`
+- send an event to listeners: `onGreeted`
+- read their default greeting from their configuration file
+
+> **Status of the code in this guide.**
+>
+> - **In-process HelloWorld:** built with `bitbake lib32-helloworld-plugin`
+>   against Thunder R4.2, with no compiler warnings. On 2026-11-17 it was
+>   running on a TV: `Controller.1.status@HelloWorld` reported `activated`,
+>   and `sayHello` returned the result shown in Stop 13.
+> - **Out-of-process HelloWorldOOP:** built on 2026-11-17 against the same
+>   Thunder R4.2, with no compiler warnings. It produces the three libraries
+>   and the config file shown in Stop 17. It has not yet been run on a TV, so
+>   the results in Stop 17.9 are the expected ones.
 
 > Diagrams use Mermaid. GitHub renders them directly. In VS Code, install the
 > *Markdown Preview Mermaid Support* extension to see them in the preview.
@@ -39,7 +51,8 @@ flowchart LR
     S13 --> S14[14 Listen to events]
     S14 --> S15[15 Use it from the UI]
     S15 --> S16[16 When things go wrong]
-    S16 --> S17[17 Where to go next]
+    S16 --> S17[17 Out-of-process version]
+    S17 --> S18[18 Where to go next]
 ```
 
 **Before you start, you need:**
@@ -160,7 +173,18 @@ flowchart LR
 
 In-process is simplest and fastest, but a crash in your plugin crashes
 `WPEFramework` for everyone. That's why big or risky plugins run out-of-process.
-Start in-process; [Stop 17](#stop-17-where-to-go-next) shows the next step.
+
+| | In-process | Out-of-process |
+|---|---|---|
+| Where your code runs | Inside `WPEFramework` | In a separate `WPEProcess` started by `WPEFramework` |
+| A crash in your code | Takes down `WPEFramework` and every plugin | Kills only your `WPEProcess`; your plugin is deactivated |
+| Calls into your code | Direct C++ calls | COM-RPC: binary messages over a local socket |
+| Extra pieces you write | None | A C++ interface, an implementation library, a proxy/stub library |
+| Examples on the TV | `org.rdk.System`, and DeviceInfo and PersistentStore (split like out-of-process plugins, but configured with `"mode": "Off"`) | SystemControl, DTV, OCDM, ResidentApp, WebKitBrowser (`"mode": "Local"`) |
+
+Start in-process (Stops 5–15).
+[Stop 17](#stop-17-the-same-plugin-out-of-process) then builds the
+out-of-process version.
 
 ---
 
@@ -235,20 +259,26 @@ That is exactly the shape your plugin will produce.
 
 ## Stop 5: the project layout
 
-The plugin is one small recipe in `meta-elaraby-aml`:
+The plugin has two parts: the source code in its own git repository, and one
+small recipe in `meta-elaraby-aml` that fetches and builds it.
 
 ```text
+github.com/Mahmoudaton33/Thunder-Plugin-Implementation   ← the plugin source
+├── CMakeLists.txt            ← Stop 9: how CMake builds it
+├── HelloWorld.conf.in        ← Stop 8: its config file template
+├── Module.h                  ← Stop 6: module boilerplate
+├── Module.cpp                ← Stop 6
+├── HelloWorld.h              ← Stop 7: the class
+└── HelloWorld.cpp            ← Stop 7: the code
+
 meta-elaraby-aml/recipes-extended/helloworld-plugin/
-├── helloworld-plugin_1.0.bb          ← Stop 10: how Yocto builds it
-└── files/
-    └── helloworld/                   ← the plugin source
-        ├── CMakeLists.txt            ← Stop 9: how CMake builds it
-        ├── HelloWorld.conf.in        ← Stop 8: its config file template
-        ├── Module.h                  ← Stop 6: module boilerplate
-        ├── Module.cpp                ← Stop 6
-        ├── HelloWorld.h              ← Stop 7: the class
-        └── HelloWorld.cpp            ← Stop 7: the code
+└── helloworld-plugin_1.0.bb  ← Stop 10: how Yocto fetches and builds it
 ```
+
+> **Starting your own plugin?** While you are still experimenting, you can keep
+> the source in the layer instead, under `files/<name>/` next to the recipe, and
+> use `SRC_URI = "file://<name>/"`. Move it to its own repository once it works.
+> Stop 17 builds the out-of-process version this way.
 
 How the files turn into what runs on the TV:
 
@@ -261,11 +291,11 @@ flowchart LR
     JSON --> TV2["/etc/WPEFramework/plugins/"]
 ```
 
-Create the folders:
+Create the recipe folder:
 
 ```sh
 cd /home/rdkuser/OROO-6.5.0/meta-elaraby-aml
-mkdir -p recipes-extended/helloworld-plugin/files/helloworld
+mkdir -p recipes-extended/helloworld-plugin
 ```
 
 ---
@@ -275,7 +305,7 @@ mkdir -p recipes-extended/helloworld-plugin/files/helloworld
 Every Thunder plugin has these two small files. They give the library a name
 and pull in the Thunder plugin API.
 
-**`files/helloworld/Module.h`**
+**`Module.h`**
 
 ```cpp
 #pragma once
@@ -296,7 +326,7 @@ and pull in the Thunder plugin API.
 | `#include <plugins/plugins.h>` | The whole plugin API: `IPlugin`, `IShell`, `JSONRPC`, JSON types, logging |
 | `EXTERNAL` redefined empty | Plugins don't export extra symbols, so this macro is not needed here |
 
-**`files/helloworld/Module.cpp`**
+**`Module.cpp`**
 
 ```cpp
 #include "Module.h"
@@ -350,7 +380,7 @@ classDiagram
 - **`JSONRPC`** gives you method registration and events for free.
 - **`Config`** describes the `configuration` part of `HelloWorld.json`.
 
-### 7.2 `files/helloworld/HelloWorld.h`
+### 7.2 `HelloWorld.h`
 
 ```cpp
 #pragma once
@@ -426,7 +456,7 @@ What each part does:
 | `_service` | The `IShell` handle Thunder gives you: your config, your callsign, and access to other plugins |
 | `_adminLock` | Calls can arrive on several Thunder worker threads at once, so shared state needs a lock |
 
-### 7.3 `files/helloworld/HelloWorld.cpp`
+### 7.3 `HelloWorld.cpp`
 
 ```cpp
 #include "HelloWorld.h"
@@ -571,14 +601,13 @@ namespace Plugin {
 ```mermaid
 flowchart LR
     JSON["HelloWorld.json<br/>classname: HelloWorld"] --> LOAD[WPEFramework loads the .so]
-    LOAD --> REG["SERVICE_REGISTRATION(HelloWorld, 1, 0, 0)<br/>registered a factory named HelloWorld"]
-    REG --> NEW[Thunder creates HelloWorld]
-    META["Plugin::Metadata&lt;HelloWorld&gt;<br/>version + subsystems"] --> NEW
+    LOAD --> META["Plugin::Metadata&lt;HelloWorld&gt;<br/>registers a factory named HelloWorld<br/>+ version + subsystems"]
+    META --> NEW[Thunder creates HelloWorld]
 ```
 
-- `SERVICE_REGISTRATION(HelloWorld, 1, 0, 0)` registers a factory under the class
-  name, so the `classname` in the config file can be turned into an object.
-- `Plugin::Metadata<HelloWorld>` is new in Thunder R4. It carries the version
+- `Plugin::Metadata<HelloWorld>` is new in Thunder R4. When the library is
+  loaded, it registers a factory under the class name, so the `classname` in
+  the config file can be turned into an object. It also carries the version
   and three lists of **subsystems** (for example `PLATFORM`, `NETWORK`,
   `GRAPHICS`):
   - *Preconditions*: don't activate until these are up
@@ -587,6 +616,12 @@ flowchart LR
 
   HelloWorld needs none, so all three lists are empty. A plugin that needs the
   network would list it under preconditions.
+- `SERVICE_REGISTRATION(HelloWorld, 1, 0, 0)` is the older (Thunder R2) way to
+  register the same factory. On R4.2 it is redundant for the plugin class,
+  because `Plugin::Metadata` already registers it, but it is harmless: Thunder
+  uses the first matching entry. You still need `SERVICE_REGISTRATION` for
+  classes that are not plugins, such as the out-of-process implementation in
+  Stop 17.
 
 **`Initialize`: what happens on activation**
 
@@ -610,7 +645,7 @@ flowchart TB
   binds the JSON-RPC method name to your member function. The two template types
   are the parameter and result types. `JsonObject` accepts any JSON object,
   which keeps a first plugin simple. Larger plugins use generated, typed classes
-  instead (see Stop 17).
+  instead (see Stop 18).
 - **The return value is the success signal.** Return `string()` for success.
   Return a message such as `"Hardware not found"` to refuse activation.
 
@@ -639,7 +674,7 @@ release the shell. After this, Thunder may unload your library.
 Thunder R4 builds the plugin's JSON config from a small template. The build
 replaces each `@NAME@` with a CMake value.
 
-**`files/helloworld/HelloWorld.conf.in`**
+**`HelloWorld.conf.in`**
 
 ```text
 precondition = ["Platform"]
@@ -668,7 +703,7 @@ configuration.add("greeting", "@PLUGIN_HELLOWORLD_GREETING@")
 
 ## Stop 9: the build rules (`CMakeLists.txt`)
 
-**`files/helloworld/CMakeLists.txt`**
+**`CMakeLists.txt`**
 
 ```cmake
 cmake_minimum_required(VERSION 3.3)
@@ -735,8 +770,9 @@ LICENSE = "CLOSED"
 
 DEPENDS = "wpeframework wpeframework-tools-native"
 
-SRC_URI = "file://helloworld/"
-S = "${WORKDIR}/helloworld"
+SRC_URI = "git://github.com/Mahmoudaton33/Thunder-Plugin-Implementation.git;protocol=https;branch=main"
+SRCREV = "64914851c32a4b95b60b0496d112723d609e6263"
+S = "${WORKDIR}/git"
 
 inherit cmake pkgconfig
 
@@ -753,7 +789,9 @@ INSANE_SKIP_${PN} += "dev-so"
 |---|---|
 | `DEPENDS = "wpeframework …"` | Thunder headers and libraries for the target |
 | `wpeframework-tools-native` | The host-side generators (ConfigGenerator, JsonGenerator) and their CMake modules. Without it, `write_config` is missing |
-| `SRC_URI = "file://helloworld/"` | Take the source from `files/helloworld/` in this layer. Real plugins use a git URL |
+| `SRC_URI = "git://…;protocol=https;branch=main"` | Fetch the source from the plugin's git repository. `git://` selects bitbake's git fetcher; `protocol=https` makes it download over HTTPS. Kirkstone needs `branch=` (it does not assume `master`) |
+| `SRCREV = "6491485…"` | The exact commit to build. Pushing new commits changes nothing until you update this hash, which keeps builds reproducible. Find the latest with `git ls-remote <url> main` |
+| `S = "${WORKDIR}/git"` | Where bitbake unpacks a git checkout. The sources are at the root of the repository |
 | `inherit cmake pkgconfig` | Build with CMake using the cross toolchain |
 | `EXTRA_OECMAKE += -D…` | Overrides the CMake cache defaults, and with them the config file values |
 | `FILES_SOLIBSDEV = ""` and `FILES_${PN}` | Plugin `.so` files are runtime files, not development files. Without this, Yocto would put the plugin in the `-dev` package |
@@ -1039,6 +1077,10 @@ flowchart TB
 | No events arrive | Using `curl`, or the `register` id doesn't match | Use a WebSocket; listen for `<id>.<event>` |
 | `WPEFramework` aborts with `sig=6` | An `ASSERT` or exception in your code takes the whole process down (in-process) | Fix the bug; consider out-of-process for risky code |
 | Process killed with `SIGSEGV` and an AppArmor `DENIED` line | Your code touches a file the `default` profile does not allow | `dmesg \| grep 'apparmor="DENIED"'`, then extend the profile in `meta-elaraby-aml/recipes-mac/AppArmor/` |
+| `curl` from your PC works, but Postman fails | Postman sends the request through a proxy, or through its cloud agent, which cannot reach a `192.168.x.x` address | Postman Settings → Proxy: turn off the system proxy and any custom proxy. Use the desktop app or the Desktop Agent. Send a **POST** with a **raw JSON** body |
+| Out-of-process: activation fails with "could not create HelloWorldImplementation" | `Root()` got no object: the implementation `.so` is missing or has another name, the class name is wrong, or `WPEProcess` did not start within the timeout | Check that `root.locator` in the plugin's `.json` names an existing file in `/usr/lib/wpeframework/plugins/`, and that the `SERVICE_REGISTRATION` class name matches the `Root<>()` call. Read the journal |
+| Out-of-process: works with `"mode": "Off"` but not with `"Local"` | The proxy/stub library is missing, so the interface cannot cross the process boundary | Check that `libWPEFrameworkHelloWorldOOPProxyStubs.so` is in `/usr/lib/wpeframework/proxystubs/`, then restart `WPEFramework` |
+| Out-of-process: the plugin turns `deactivated` on its own | The `WPEProcess` crashed or was killed; `Deactivated()` asked Thunder to deactivate the plugin | Look for the crash in the journal; activate the plugin again to start a new `WPEProcess` |
 
 **Useful commands on the TV:**
 
@@ -1050,16 +1092,970 @@ ls -la /usr/lib/wpeframework/plugins/ /etc/WPEFramework/plugins/ | grep -i hello
 
 ---
 
-## Stop 17: where to go next
+## Stop 17: the same plugin, out-of-process
 
-You now know the core. Real plugins in this tree add the following, in roughly
-this order:
+In-process HelloWorld works, but all of its code runs inside `WPEFramework`. A
+bug that crashes it, such as a `nullptr` dereference, takes down every plugin
+on the TV and the UI with them. This stop builds **HelloWorldOOP**. It has the
+same JSON-RPC API, but its work runs in a separate process.
+
+### 17.1 What changes
+
+```mermaid
+flowchart LR
+    UI[Client] -- "JSON-RPC<br/>port 9998" --> P
+    subgraph WPE["WPEFramework process"]
+        P["HelloWorldOOP plugin<br/>JSON-RPC methods<br/>(libWPEFrameworkHelloWorldOOP.so)"]
+        PX["IHelloWorld proxy<br/>(ProxyStubs .so)"]
+        P --> PX
+    end
+    subgraph WP["WPEProcess (started by WPEFramework)"]
+        ST["IHelloWorld stub<br/>(ProxyStubs .so)"]
+        IM["HelloWorldImplementation<br/>the real work<br/>(…Implementation.so)"]
+        ST --> IM
+    end
+    PX -- "COM-RPC<br/>local socket" --> ST
+    IM -. "Greeted() callback<br/>COM-RPC" .-> P
+    style IM fill:#2e7d32,color:#fff
+```
+
+The plugin is split into three libraries:
+
+| Library | Loaded by | Contains |
+|---|---|---|
+| `libWPEFrameworkHelloWorldOOP.so` | `WPEFramework` | The plugin class: lifecycle, JSON-RPC methods and events. It holds no state of its own |
+| `libWPEFrameworkHelloWorldOOPImplementation.so` | `WPEProcess` (or `WPEFramework`, see 17.10) | The implementation class: the greeting, the counter and the logic |
+| `libWPEFrameworkHelloWorldOOPProxyStubs.so` | Both processes, at start-up | Generated code that turns `IHelloWorld` calls into COM-RPC messages and back |
+
+The plugin and the implementation talk only through a C++ interface,
+`Exchange::IHelloWorld`. That interface is the contract between them.
+
+One call, step by step:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant P as HelloWorldOOP<br/>(WPEFramework)
+    participant X as Proxy / Stub<br/>(COM-RPC)
+    participant I as HelloWorldImplementation<br/>(WPEProcess)
+
+    C->>P: HelloWorldOOP.1.sayHello {"name":"Mahmoud"}
+    P->>X: _implementation->SayHello("Mahmoud", message, count)
+    X->>I: COM-RPC message over a local socket
+    I->>I: build "Hello, Mahmoud!", count++
+    I->>X: sink->Greeted("Mahmoud", 1)
+    X->>P: Notification::Greeted()
+    P-->>C: event onGreeted
+    I-->>X: return ERROR_NONE, message, count
+    X-->>P: out-parameters filled in
+    P-->>C: result {"message":"Hello, Mahmoud!","count":1,"success":true}
+```
+
+### 17.2 Project layout
+
+The source lives in the layer here, under `files/`. You can move it to its own
+git repository later, as HelloWorld did (Stop 10).
+
+```text
+meta-elaraby-aml/recipes-extended/helloworldoop-plugin/
+├── helloworldoop-plugin_1.0.bb         ← 17.8
+└── files/
+    └── helloworldoop/
+        ├── IHelloWorld.h               ← 17.3 the COM-RPC interface
+        ├── HelloWorldImplementation.cpp← 17.4 the work (runs in WPEProcess)
+        ├── HelloWorldOOP.h             ← 17.5 the plugin class
+        ├── HelloWorldOOP.cpp           ← 17.5
+        ├── HelloWorldOOP.conf.in       ← 17.6 config: where to run
+        ├── CMakeLists.txt              ← 17.7 builds three libraries
+        ├── Module.h                    ← as in Stop 6, with a new name
+        └── Module.cpp                  ← as in Stop 6
+```
+
+`Module.h` is the one from Stop 6 with `MODULE_NAME` set to
+`Plugin_HelloWorldOOP`. `Module.cpp` is identical to Stop 6. All three
+libraries compile `Module.cpp`, because every Thunder library needs exactly
+one `MODULE_NAME_DECLARATION`.
+
+### 17.3 The interface (`IHelloWorld.h`)
+
+```cpp
+#pragma once
+
+#include "Module.h"
+
+namespace WPEFramework {
+namespace Exchange {
+
+    // Interface IDs must be unique in the whole system. IDs from
+    // ID_OFFSET_CUSTOM (0x80000000) upwards are reserved for private
+    // interfaces that are not part of wpeframework-interfaces.
+    enum HelloWorldIds : uint32_t {
+        ID_HELLOWORLD              = Core::IUnknown::ID_OFFSET_CUSTOM + 0x0100,
+        ID_HELLOWORLD_NOTIFICATION = ID_HELLOWORLD + 1
+    };
+
+    // The COM-RPC contract between the plugin (inside WPEFramework) and the
+    // implementation (inside WPEProcess).
+    struct EXTERNAL IHelloWorld : virtual public Core::IUnknown {
+        enum { ID = ID_HELLOWORLD };
+
+        // Callback from the implementation back to the plugin.
+        struct EXTERNAL INotification : virtual public Core::IUnknown {
+            enum { ID = ID_HELLOWORLD_NOTIFICATION };
+
+            ~INotification() override = default;
+
+            virtual void Greeted(const string& name, const uint32_t count) = 0;
+        };
+
+        ~IHelloWorld() override = default;
+
+        virtual uint32_t Register(INotification* sink) = 0;
+        virtual uint32_t Unregister(INotification* sink) = 0;
+
+        virtual uint32_t Configure(const string& greeting) = 0;
+        virtual uint32_t SayHello(const string& name, string& message /* @out */, uint32_t& count /* @out */) = 0;
+        virtual uint32_t GetGreeting(string& greeting /* @out */) const = 0;
+        virtual uint32_t SetGreeting(const string& greeting) = 0;
+        virtual uint32_t ProcessId(uint32_t& pid /* @out */) const = 0;
+    };
+
+} // namespace Exchange
+} // namespace WPEFramework
+```
+
+| Part | Why |
+|---|---|
+| `struct EXTERNAL IHelloWorld : virtual public Core::IUnknown` | Every COM-RPC interface derives from `Core::IUnknown`, which provides `AddRef`, `Release` and `QueryInterface` |
+| `enum { ID = … }` | A number that identifies the interface on the wire. It must be unique on the whole TV. The shared interfaces in `wpeframework-interfaces` take their IDs from `interfaces/Ids.h`. A private interface like this one uses the custom range, which starts at `Core::IUnknown::ID_OFFSET_CUSTOM` (`0x80000000`). No other component on this TV uses that range |
+| Only pure virtual methods, returning `uint32_t` | The proxy/stub generator creates code for each method. The `uint32_t` is a Thunder error code, so a call can fail, for example when the other process has died |
+| `/* @out */` | Tells the generator that the parameter is filled in by the implementation and must be sent back to the caller |
+| Simple types (`string`, integers, `bool`, enums, interface pointers) | These are what COM-RPC copies between processes most easily. For lists, the shared interfaces in this tree use iterator interfaces (for example `ID_DTV_…_ITERATOR` in `Ids.h`) rather than STL containers |
+| `INotification` | A second interface, implemented by the plugin, so the implementation can call back. Interface pointers are passed across processes as remote references |
+
+### 17.4 The implementation (`HelloWorldImplementation.cpp`)
+
+This is the code that runs in `WPEProcess`. It knows nothing about JSON-RPC.
+
+```cpp
+#include "Module.h"
+#include "IHelloWorld.h"
+
+#include <unistd.h>
+#include <list>
+#include <algorithm>
+
+namespace WPEFramework {
+namespace Plugin {
+
+    // The real work. With "mode": "Local" this object lives in a separate
+    // WPEProcess; WPEFramework only sees a proxy of it.
+    class HelloWorldImplementation : public Exchange::IHelloWorld {
+    public:
+        HelloWorldImplementation(const HelloWorldImplementation&) = delete;
+        HelloWorldImplementation& operator=(const HelloWorldImplementation&) = delete;
+
+        HelloWorldImplementation()
+            : _adminLock()
+            , _greeting(_T("Hello"))
+            , _count(0)
+            , _sinks()
+        {
+        }
+
+        ~HelloWorldImplementation() override
+        {
+            _adminLock.Lock();
+            for (auto sink : _sinks) {
+                sink->Release();
+            }
+            _sinks.clear();
+            _adminLock.Unlock();
+        }
+
+        BEGIN_INTERFACE_MAP(HelloWorldImplementation)
+            INTERFACE_ENTRY(Exchange::IHelloWorld)
+        END_INTERFACE_MAP
+
+        uint32_t Register(Exchange::IHelloWorld::INotification* sink) override
+        {
+            ASSERT(sink != nullptr);
+
+            _adminLock.Lock();
+            if (std::find(_sinks.begin(), _sinks.end(), sink) == _sinks.end()) {
+                sink->AddRef();
+                _sinks.push_back(sink);
+            }
+            _adminLock.Unlock();
+
+            return Core::ERROR_NONE;
+        }
+
+        uint32_t Unregister(Exchange::IHelloWorld::INotification* sink) override
+        {
+            uint32_t result = Core::ERROR_UNKNOWN_KEY;
+
+            _adminLock.Lock();
+            auto index = std::find(_sinks.begin(), _sinks.end(), sink);
+            if (index != _sinks.end()) {
+                (*index)->Release();
+                _sinks.erase(index);
+                result = Core::ERROR_NONE;
+            }
+            _adminLock.Unlock();
+
+            return result;
+        }
+
+        uint32_t Configure(const string& greeting) override
+        {
+            _adminLock.Lock();
+            _greeting = greeting;
+            _adminLock.Unlock();
+
+            SYSLOG(Logging::Startup, (_T("HelloWorldImplementation: configured in PID %d"), getpid()));
+            return Core::ERROR_NONE;
+        }
+
+        uint32_t SayHello(const string& name, string& message, uint32_t& count) override
+        {
+            std::list<Exchange::IHelloWorld::INotification*> sinks;
+
+            _adminLock.Lock();
+            message = _greeting + _T(", ") + name + _T("!");
+            count = ++_count;
+            // Take a reference to every sink, so they can be called without
+            // holding the lock.
+            for (auto sink : _sinks) {
+                sink->AddRef();
+                sinks.push_back(sink);
+            }
+            _adminLock.Unlock();
+
+            for (auto sink : sinks) {
+                sink->Greeted(name, count);
+                sink->Release();
+            }
+
+            return Core::ERROR_NONE;
+        }
+
+        uint32_t GetGreeting(string& greeting) const override
+        {
+            _adminLock.Lock();
+            greeting = _greeting;
+            _adminLock.Unlock();
+            return Core::ERROR_NONE;
+        }
+
+        uint32_t SetGreeting(const string& greeting) override
+        {
+            if (greeting.empty() == true) {
+                return Core::ERROR_BAD_REQUEST;
+            }
+
+            _adminLock.Lock();
+            _greeting = greeting;
+            _adminLock.Unlock();
+            return Core::ERROR_NONE;
+        }
+
+        uint32_t ProcessId(uint32_t& pid) const override
+        {
+            pid = static_cast<uint32_t>(getpid());
+            return Core::ERROR_NONE;
+        }
+
+    private:
+        mutable Core::CriticalSection _adminLock;
+        string _greeting;
+        uint32_t _count;
+        std::list<Exchange::IHelloWorld::INotification*> _sinks;
+    };
+
+    // Lets IShell::Root() create this class by name, in whichever process
+    // the "root" configuration selects.
+    SERVICE_REGISTRATION(HelloWorldImplementation, 1, 0, 0);
+
+} // namespace Plugin
+} // namespace WPEFramework
+```
+
+| Part | Why |
+|---|---|
+| `class HelloWorldImplementation : public Exchange::IHelloWorld` | Implements the interface. There is no `IPlugin` here, so this class has no lifecycle of its own: it lives as long as the plugin holds a reference |
+| `INTERFACE_ENTRY(Exchange::IHelloWorld)` | Lets `QueryInterface` (and so COM-RPC) find the interface on this object |
+| `SERVICE_REGISTRATION(HelloWorldImplementation, 1, 0, 0)` | Registers a factory under the name `"HelloWorldImplementation"`. That is the name the plugin passes to `Root<>()`. Without it, `Root()` returns `nullptr` |
+| `Register` / `Unregister` with `AddRef` / `Release` | The implementation keeps the plugin's notification sink alive while it holds it. Across processes, that pointer is a proxy back into `WPEFramework` |
+| In `SayHello`, sinks are copied and called after `Unlock()` | `Greeted()` is a COM-RPC call back into the other process. Calling out while holding `_adminLock` invites deadlocks. This is the same rule as Stop 7 |
+| `ProcessId` | Returns `getpid()`. Only used to show which process the code runs in |
+
+### 17.5 The plugin (`HelloWorldOOP.h`, `HelloWorldOOP.cpp`)
+
+The plugin is now a thin layer: it starts the implementation, turns JSON-RPC
+calls into `IHelloWorld` calls, and turns `Greeted()` callbacks into
+JSON-RPC events.
+
+**`HelloWorldOOP.h`**
+
+```cpp
+#pragma once
+
+#include "Module.h"
+#include "IHelloWorld.h"
+
+namespace WPEFramework {
+namespace Plugin {
+
+    class HelloWorldOOP : public PluginHost::IPlugin, public PluginHost::JSONRPC {
+    private:
+        // Reads the "configuration" object of HelloWorldOOP.json.
+        class Config : public Core::JSON::Container {
+        public:
+            Config(const Config&) = delete;
+            Config& operator=(const Config&) = delete;
+
+            Config()
+                : Core::JSON::Container()
+                , Greeting(_T("Hello"))
+            {
+                Add(_T("greeting"), &Greeting);
+            }
+            ~Config() override = default;
+
+        public:
+            Core::JSON::String Greeting;
+        };
+
+        // One object, two jobs:
+        //  - IRemoteConnection::INotification: tells us when the WPEProcess
+        //    that hosts the implementation starts or dies.
+        //  - IHelloWorld::INotification: receives Greeted() calls from the
+        //    implementation (over COM-RPC when out-of-process).
+        class Notification : public RPC::IRemoteConnection::INotification,
+                             public Exchange::IHelloWorld::INotification {
+        public:
+            Notification() = delete;
+            Notification(const Notification&) = delete;
+            Notification& operator=(const Notification&) = delete;
+
+            explicit Notification(HelloWorldOOP& parent)
+                : _parent(parent)
+            {
+            }
+            ~Notification() override = default;
+
+            BEGIN_INTERFACE_MAP(Notification)
+                INTERFACE_ENTRY(Exchange::IHelloWorld::INotification)
+                INTERFACE_ENTRY(RPC::IRemoteConnection::INotification)
+            END_INTERFACE_MAP
+
+            // RPC::IRemoteConnection::INotification
+            void Activated(RPC::IRemoteConnection*) override
+            {
+            }
+            void Deactivated(RPC::IRemoteConnection* connection) override
+            {
+                _parent.Deactivated(connection);
+            }
+
+            // Exchange::IHelloWorld::INotification
+            void Greeted(const string& name, const uint32_t count) override
+            {
+                _parent.Greeted(name, count);
+            }
+
+        private:
+            HelloWorldOOP& _parent;
+        };
+
+    public:
+        HelloWorldOOP(const HelloWorldOOP&) = delete;
+        HelloWorldOOP& operator=(const HelloWorldOOP&) = delete;
+
+        HelloWorldOOP();
+        ~HelloWorldOOP() override;
+
+        BEGIN_INTERFACE_MAP(HelloWorldOOP)
+            INTERFACE_ENTRY(PluginHost::IPlugin)
+            INTERFACE_ENTRY(PluginHost::IDispatcher)
+            INTERFACE_AGGREGATE(Exchange::IHelloWorld, _implementation)
+        END_INTERFACE_MAP
+
+        // PluginHost::IPlugin
+        const string Initialize(PluginHost::IShell* service) override;
+        void Deinitialize(PluginHost::IShell* service) override;
+        string Information() const override;
+
+    private:
+        void Deactivated(RPC::IRemoteConnection* connection);
+        void Greeted(const string& name, const uint32_t count);
+
+        // JSON-RPC methods
+        uint32_t SayHello(const JsonObject& parameters, JsonObject& response);
+        uint32_t GetGreeting(const JsonObject& parameters, JsonObject& response);
+        uint32_t SetGreeting(const JsonObject& parameters, JsonObject& response);
+        uint32_t GetProcessInfo(const JsonObject& parameters, JsonObject& response);
+
+    private:
+        PluginHost::IShell* _service;
+        uint32_t _connectionId;
+        Exchange::IHelloWorld* _implementation;
+        Core::Sink<Notification> _notification;
+    };
+
+} // namespace Plugin
+} // namespace WPEFramework
+```
+
+**`HelloWorldOOP.cpp`**
+
+```cpp
+#include "HelloWorldOOP.h"
+
+#include <unistd.h>
+
+namespace WPEFramework {
+
+namespace {
+    static Plugin::Metadata<Plugin::HelloWorldOOP> metadata(
+        // Version (Major, Minor, Patch)
+        1, 0, 0,
+        // Preconditions
+        {},
+        // Terminations
+        {},
+        // Controls
+        {}
+    );
+}
+
+namespace Plugin {
+
+    // How long Initialize() waits for WPEProcess to start and hand back the
+    // implementation.
+    static constexpr uint32_t ImplementationTimeout = 2000; // ms
+
+    HelloWorldOOP::HelloWorldOOP()
+        : PluginHost::JSONRPC()
+        , _service(nullptr)
+        , _connectionId(0)
+        , _implementation(nullptr)
+        , _notification(*this)
+    {
+    }
+
+    HelloWorldOOP::~HelloWorldOOP() = default;
+
+    const string HelloWorldOOP::Initialize(PluginHost::IShell* service)
+    {
+        ASSERT(service != nullptr);
+        ASSERT(_service == nullptr);
+        ASSERT(_implementation == nullptr);
+        ASSERT(_connectionId == 0);
+
+        string message;
+
+        _service = service;
+        _service->AddRef();
+
+        // Register before Root(), so a crash during start-up is not missed.
+        _service->Register(&_notification);
+
+        // Start (or load) the implementation. The "root" object in the config
+        // decides where: "Local" = a new WPEProcess, "Off" = inside
+        // WPEFramework. _connectionId identifies the WPEProcess.
+        _implementation = _service->Root<Exchange::IHelloWorld>(_connectionId, ImplementationTimeout, _T("HelloWorldImplementation"));
+
+        if (_implementation == nullptr) {
+            message = _T("HelloWorldOOP: could not create HelloWorldImplementation");
+        } else {
+            Config config;
+            config.FromString(_service->ConfigLine());
+
+            _implementation->Configure(config.Greeting.Value());
+            _implementation->Register(&_notification);
+
+            Register<JsonObject, JsonObject>(_T("sayHello"), &HelloWorldOOP::SayHello, this);
+            Register<JsonObject, JsonObject>(_T("getGreeting"), &HelloWorldOOP::GetGreeting, this);
+            Register<JsonObject, JsonObject>(_T("setGreeting"), &HelloWorldOOP::SetGreeting, this);
+            Register<JsonObject, JsonObject>(_T("getProcessInfo"), &HelloWorldOOP::GetProcessInfo, this);
+
+            SYSLOG(Logging::Startup, (_T("HelloWorldOOP: plugin in PID %d, implementation connection %u"), getpid(), _connectionId));
+        }
+
+        // With Thunder R4.2's default "legacyinitialize": true, Thunder does
+        // NOT call Deinitialize() after a failed Initialize(). Clean up here.
+        if (message.empty() == false) {
+            Deinitialize(service);
+        }
+
+        return message;
+    }
+
+    void HelloWorldOOP::Deinitialize(PluginHost::IShell* service)
+    {
+        ASSERT(_service == service);
+
+        // Stop hearing about the remote process before tearing it down.
+        _service->Unregister(&_notification);
+
+        if (_implementation != nullptr) {
+            Unregister(_T("sayHello"));
+            Unregister(_T("getGreeting"));
+            Unregister(_T("setGreeting"));
+            Unregister(_T("getProcessInfo"));
+
+            _implementation->Unregister(&_notification);
+
+            // Get the connection before releasing the last reference.
+            RPC::IRemoteConnection* connection = _service->RemoteConnection(_connectionId);
+
+            VARIABLE_IS_NOT_USED uint32_t result = _implementation->Release();
+            _implementation = nullptr;
+
+            // Ours was the last reference, so the object must be destroyed.
+            ASSERT(result == Core::ERROR_DESTRUCTION_SUCCEEDED);
+
+            // Out-of-process only: stop the WPEProcess (it is killed if it
+            // does not exit by itself). In-process, connection is nullptr.
+            if (connection != nullptr) {
+                connection->Terminate();
+                connection->Release();
+            }
+        }
+
+        _connectionId = 0;
+        _service->Release();
+        _service = nullptr;
+
+        SYSLOG(Logging::Shutdown, (_T("HelloWorldOOP: deinitialized")));
+    }
+
+    string HelloWorldOOP::Information() const
+    {
+        return string();
+    }
+
+    // Called by Thunder (on its own thread) when any remote process goes
+    // away. If it is ours, the implementation crashed or was killed: ask
+    // Thunder to deactivate the plugin cleanly. This must not be done
+    // directly here, so it is queued as a job.
+    void HelloWorldOOP::Deactivated(RPC::IRemoteConnection* connection)
+    {
+        if (connection->Id() == _connectionId) {
+            ASSERT(_service != nullptr);
+            Core::IWorkerPool::Instance().Submit(PluginHost::IShell::Job::Create(_service,
+                PluginHost::IShell::DEACTIVATED, PluginHost::IShell::FAILURE));
+        }
+    }
+
+    // The implementation called IHelloWorld::INotification::Greeted().
+    // Turn it into a JSON-RPC event.
+    void HelloWorldOOP::Greeted(const string& name, const uint32_t count)
+    {
+        JsonObject event;
+        event[_T("name")] = name;
+        event[_T("count")] = count;
+        Notify(_T("onGreeted"), event);
+    }
+
+    // HelloWorldOOP.1.sayHello {"name":"Mahmoud"}  ->  {"message":"Hello, Mahmoud!","count":1}
+    uint32_t HelloWorldOOP::SayHello(const JsonObject& parameters, JsonObject& response)
+    {
+        if (parameters.HasLabel(_T("name")) == false) {
+            return Core::ERROR_BAD_REQUEST;
+        }
+
+        string message;
+        uint32_t count = 0;
+
+        // A COM-RPC call: runs in the WPEProcess when out-of-process.
+        const uint32_t result = _implementation->SayHello(parameters[_T("name")].String(), message, count);
+
+        if (result == Core::ERROR_NONE) {
+            response[_T("message")] = message;
+            response[_T("count")] = count;
+            response[_T("success")] = true;
+        }
+
+        return result;
+    }
+
+    // HelloWorldOOP.1.getGreeting  ->  {"greeting":"Hello"}
+    uint32_t HelloWorldOOP::GetGreeting(const JsonObject& parameters VARIABLE_IS_NOT_USED, JsonObject& response)
+    {
+        string greeting;
+        const uint32_t result = _implementation->GetGreeting(greeting);
+
+        if (result == Core::ERROR_NONE) {
+            response[_T("greeting")] = greeting;
+            response[_T("success")] = true;
+        }
+
+        return result;
+    }
+
+    // HelloWorldOOP.1.setGreeting {"greeting":"Ahlan"}  ->  {"success":true}
+    uint32_t HelloWorldOOP::SetGreeting(const JsonObject& parameters, JsonObject& response)
+    {
+        if (parameters.HasLabel(_T("greeting")) == false) {
+            return Core::ERROR_BAD_REQUEST;
+        }
+
+        const uint32_t result = _implementation->SetGreeting(parameters[_T("greeting")].String());
+
+        if (result == Core::ERROR_NONE) {
+            response[_T("success")] = true;
+        }
+
+        return result;
+    }
+
+    // HelloWorldOOP.1.getProcessInfo  ->  {"pluginPid":1234,"implementationPid":5678,"outOfProcess":true}
+    uint32_t HelloWorldOOP::GetProcessInfo(const JsonObject& parameters VARIABLE_IS_NOT_USED, JsonObject& response)
+    {
+        uint32_t implementationPid = 0;
+        const uint32_t result = _implementation->ProcessId(implementationPid);
+
+        if (result == Core::ERROR_NONE) {
+            const uint32_t pluginPid = static_cast<uint32_t>(getpid());
+            response[_T("pluginPid")] = pluginPid;
+            response[_T("implementationPid")] = implementationPid;
+            response[_T("outOfProcess")] = (pluginPid != implementationPid);
+            response[_T("success")] = true;
+        }
+
+        return result;
+    }
+
+} // namespace Plugin
+} // namespace WPEFramework
+```
+
+What is new compared with in-process HelloWorld:
+
+```mermaid
+flowchart TB
+    A[Initialize] --> B["_service->Register(&_notification)<br/>watch remote processes"]
+    B --> C["_service->Root&lt;IHelloWorld&gt;(_connectionId, 2000,<br/>&quot;HelloWorldImplementation&quot;)"]
+    C -- nullptr --> F["message = error<br/>Deinitialize(service)<br/>return message"]
+    C -- interface --> D["Configure(greeting)<br/>Register(&_notification)"]
+    D --> E["Register JSON-RPC methods<br/>return empty string"]
+```
+
+| Part | Why |
+|---|---|
+| `_service->Root<Exchange::IHelloWorld>(_connectionId, 2000, "HelloWorldImplementation")` | The key call. Thunder reads the `root` object from the plugin's config. With `"mode": "Local"` it starts a `WPEProcess`, which loads the implementation library and creates `HelloWorldImplementation`. You get back a proxy, plus `_connectionId` to identify that process. Thunder waits up to 2000 ms |
+| `class Notification` | One object that implements two callback interfaces. `RPC::IRemoteConnection::INotification` tells you when a `WPEProcess` starts or stops. `IHelloWorld::INotification` receives `Greeted()` |
+| `Core::Sink<Notification>` | Wraps the object with a reference count that never deletes it, so it can be a member variable but still be handed out as a COM interface |
+| `_service->Register(&_notification)` before `Root()` | So a crash during start-up is reported too |
+| `Deactivated(connection)` | Called when any remote process goes away. If it is ours, the implementation has crashed. The plugin cannot deactivate itself from inside this callback, so it queues `IShell::Job::Create(…, DEACTIVATED, FAILURE)` on Thunder's worker pool |
+| `Deinitialize(service)` called from `Initialize()` on failure | In this Thunder R4.2 build, `legacyinitialize` defaults to `true`, and with that Thunder does **not** call `Deinitialize()` after a failed `Initialize()`. The plugin must clean up itself |
+| `RemoteConnection(_connectionId)` before `Release()` | Gets the process handle while it still exists. After releasing the last reference, `connection->Terminate()` asks the `WPEProcess` to exit and kills it if it doesn't |
+| `ASSERT(result == Core::ERROR_DESTRUCTION_SUCCEEDED)` | The plugin should hold the last reference. If not, something leaked |
+| `INTERFACE_AGGREGATE(Exchange::IHelloWorld, _implementation)` | Lets other plugins (and other processes) get `IHelloWorld` directly with `QueryInterfaceByCallsign<Exchange::IHelloWorld>("HelloWorldOOP")`, without going through JSON-RPC |
+| No lock in the plugin | The plugin holds no state. All state, and its lock, are in the implementation |
+| `getProcessInfo` | A new method that returns both PIDs, so you can see the split |
+
+### 17.6 The config template (`HelloWorldOOP.conf.in`)
+
+```text
+precondition = ["Platform"]
+callsign = "HelloWorldOOP"
+autostart = "@PLUGIN_HELLOWORLDOOP_AUTOSTART@"
+startuporder = "@PLUGIN_HELLOWORLDOOP_STARTUPORDER@"
+
+process = JSON()
+process.add("mode", "@PLUGIN_HELLOWORLDOOP_MODE@")
+process.add("locator", "lib@PLUGIN_IMPLEMENTATION@.so")
+
+configuration = JSON()
+configuration.add("root", process)
+configuration.add("greeting", "@PLUGIN_HELLOWORLDOOP_GREETING@")
+```
+
+The new part is the `root` object inside `configuration`:
+
+| Key | Meaning |
+|---|---|
+| `root.mode` | `"Local"`: run the implementation in a new `WPEProcess` on the same TV. `"Off"`: load it inside `WPEFramework` (in-process). (`"Container"` and `"Distributed"` exist but are not used on this TV) |
+| `root.locator` | The implementation library. Thunder looks for it in the same folder as the plugin library |
+
+The generated `HelloWorldOOP.json`, from the verification build:
+
+```json
+{
+ "locator":"libWPEFrameworkHelloWorldOOP.so",
+ "classname":"HelloWorldOOP",
+ "precondition":[
+  "Platform"
+ ],
+ "callsign":"HelloWorldOOP",
+ "autostart":true,
+ "configuration":{
+  "root":{
+   "mode":"Local",
+   "locator":"libWPEFrameworkHelloWorldOOPImplementation.so"
+  },
+  "greeting":"Hello"
+ }
+}
+```
+
+### 17.7 The build rules (`CMakeLists.txt`)
+
+```cmake
+cmake_minimum_required(VERSION 3.3)
+project(HelloWorldOOP)
+
+find_package(WPEFramework)
+
+set(PLUGIN_NAME HelloWorldOOP)
+set(MODULE_NAME ${NAMESPACE}${PLUGIN_NAME})
+set(PLUGIN_IMPLEMENTATION ${MODULE_NAME}Implementation)
+set(PLUGIN_PROXYSTUBS ${MODULE_NAME}ProxyStubs)
+
+set(PLUGIN_HELLOWORLDOOP_AUTOSTART "false" CACHE STRING "Activate the plugin when WPEFramework starts")
+set(PLUGIN_HELLOWORLDOOP_STARTUPORDER "" CACHE STRING "Activation order among autostart plugins")
+set(PLUGIN_HELLOWORLDOOP_MODE "Local" CACHE STRING "Where the implementation runs: Off (in-process) or Local (WPEProcess)")
+set(PLUGIN_HELLOWORLDOOP_GREETING "Hello" CACHE STRING "Default greeting word")
+
+find_package(${NAMESPACE}Plugins REQUIRED)
+find_package(CompileSettingsDebug CONFIG REQUIRED)
+find_package(ProxyStubGenerator REQUIRED)
+
+string(TOLOWER ${NAMESPACE} STORAGE_DIRECTORY)
+
+# 1. The plugin: loaded by WPEFramework, owns the JSON-RPC API.
+add_library(${MODULE_NAME} SHARED
+    HelloWorldOOP.cpp
+    Module.cpp)
+
+# 2. The implementation: loaded by WPEProcess ("Local") or by
+#    WPEFramework ("Off").
+add_library(${PLUGIN_IMPLEMENTATION} SHARED
+    HelloWorldImplementation.cpp
+    Module.cpp)
+
+# 3. The proxy/stub library: lets IHelloWorld cross the process boundary.
+#    Generated from IHelloWorld.h at configure time.
+ProxyStubGenerator(
+    INPUT "${CMAKE_CURRENT_SOURCE_DIR}/IHelloWorld.h"
+    OUTDIR "${CMAKE_CURRENT_BINARY_DIR}/generated"
+    INCLUDE_PATH "${CMAKE_SYSROOT}${CMAKE_INSTALL_PREFIX}/include/${NAMESPACE}")
+
+add_library(${PLUGIN_PROXYSTUBS} SHARED
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/ProxyStubs_HelloWorld.cpp"
+    Module.cpp)
+
+target_include_directories(${PLUGIN_PROXYSTUBS} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+
+foreach(target ${MODULE_NAME} ${PLUGIN_IMPLEMENTATION} ${PLUGIN_PROXYSTUBS})
+    set_target_properties(${target} PROPERTIES
+        CXX_STANDARD 11
+        CXX_STANDARD_REQUIRED YES)
+
+    target_link_libraries(${target}
+        PRIVATE
+            CompileSettingsDebug::CompileSettingsDebug
+            ${NAMESPACE}Plugins::${NAMESPACE}Plugins)
+endforeach()
+
+install(TARGETS ${MODULE_NAME} ${PLUGIN_IMPLEMENTATION}
+    DESTINATION ${CMAKE_INSTALL_PREFIX}/lib/${STORAGE_DIRECTORY}/plugins)
+
+install(TARGETS ${PLUGIN_PROXYSTUBS}
+    DESTINATION ${CMAKE_INSTALL_PREFIX}/lib/${STORAGE_DIRECTORY}/proxystubs)
+
+write_config(${PLUGIN_NAME})
+```
+
+| Part | Why |
+|---|---|
+| Three `add_library(… SHARED …)` | Plugin, implementation and proxy/stubs are separate libraries, because they are loaded by different processes |
+| `find_package(ProxyStubGenerator REQUIRED)` | Comes with `wpeframework-tools-native`, which the recipe already depends on |
+| `ProxyStubGenerator(INPUT … OUTDIR …)` | Runs at configure time and writes `generated/ProxyStubs_HelloWorld.cpp` from `IHelloWorld.h`. The file name is `ProxyStubs_` plus the header name without the leading `I` |
+| `INCLUDE_PATH …/include/WPEFramework` | Lets the generator find Thunder's own headers in the target sysroot |
+| Install into `…/proxystubs` | Both `WPEFramework` and `WPEProcess` load every library in `/usr/lib/wpeframework/proxystubs` (`"proxystubpath"` in `/etc/WPEFramework/config.json`) |
+| `@PLUGIN_IMPLEMENTATION@` | The `.conf.in` uses this CMake variable for `root.locator`, so the config always names the library that was built |
+
+### 17.8 The recipe (`helloworldoop-plugin_1.0.bb`)
+
+```bitbake
+SUMMARY = "Hello World out-of-process Thunder plugin (training example)"
+LICENSE = "CLOSED"
+
+DEPENDS = "wpeframework wpeframework-tools-native"
+
+SRC_URI = "file://helloworldoop/"
+S = "${WORKDIR}/helloworldoop"
+
+inherit cmake pkgconfig
+
+EXTRA_OECMAKE += " -DPLUGIN_HELLOWORLDOOP_AUTOSTART=true"
+EXTRA_OECMAKE += " -DPLUGIN_HELLOWORLDOOP_MODE=Local"
+EXTRA_OECMAKE += " -DPLUGIN_HELLOWORLDOOP_GREETING=Hello"
+
+FILES_SOLIBSDEV = ""
+FILES_${PN} += "${libdir}/wpeframework/plugins/*.so"
+FILES_${PN} += "${libdir}/wpeframework/proxystubs/*.so"
+FILES_${PN} += "${sysconfdir}/WPEFramework/plugins/HelloWorldOOP.json"
+INSANE_SKIP_${PN} += "dev-so"
+```
+
+Compared with Stop 10, it sets `PLUGIN_HELLOWORLDOOP_MODE`, and it packages the
+proxy/stub library from `${libdir}/wpeframework/proxystubs`.
+
+Build it:
+
+```sh
+cd /home/rdkuser/OROO-6.5.0
+source openembedded-core/oe-init-build-env build
+export MACHINE=mesont5w-5.4-lib32-ea3300-elaraby
+bitbake lib32-helloworldoop-plugin
+```
+
+The verification build produced these files in
+`tmp/work/armv7at2hf-neon-rdkmllib32-linux-gnueabi/lib32-helloworldoop-plugin/1.0-r0/image/`:
+
+```text
+usr/lib/wpeframework/plugins/libWPEFrameworkHelloWorldOOP.so
+usr/lib/wpeframework/plugins/libWPEFrameworkHelloWorldOOPImplementation.so
+usr/lib/wpeframework/proxystubs/libWPEFrameworkHelloWorldOOPProxyStubs.so
+etc/WPEFramework/plugins/HelloWorldOOP.json
+```
+
+### 17.9 Put it on the TV and try it
+
+Copy the four files as in Stop 12, Option A, with one more destination:
+
+```sh
+# on the build machine, from the image/ folder above
+scp usr/lib/wpeframework/plugins/libWPEFrameworkHelloWorldOOP*.so          root@<tv-ip>:/usr/lib/wpeframework/plugins/
+scp usr/lib/wpeframework/proxystubs/libWPEFrameworkHelloWorldOOPProxyStubs.so root@<tv-ip>:/usr/lib/wpeframework/proxystubs/
+scp etc/WPEFramework/plugins/HelloWorldOOP.json                             root@<tv-ip>:/etc/WPEFramework/plugins/
+
+# on the TV
+systemctl restart wpeframework
+```
+
+If `/` is read-only, run `mount -o remount,rw /` on the TV first. The restart
+is required: the proxy/stub libraries are loaded only when `WPEFramework`
+starts.
+
+**1. Is it activated, and is there a `WPEProcess`?**
+
+```sh
+curl -s -X POST -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"Controller.1.status@HelloWorldOOP"}' \
+  http://127.0.0.1:9998/jsonrpc
+
+ps -ef | grep '[W]PEProcess.*-C HelloWorldOOP'
+```
+
+Expected: `"state":"activated"`, and one `WPEProcess` line. Its command line
+shows exactly what the config asked for, for example:
+
+```text
+root  4501  3368 … WPEProcess -l libWPEFrameworkHelloWorldOOPImplementation.so -c HelloWorldImplementation -C HelloWorldOOP -r /tmp/communicator …
+```
+
+`-l` is `root.locator`, `-c` is the class name passed to `Root<>()`, `-C` is
+the callsign, and `-r` is the socket the COM-RPC messages travel over. The
+other out-of-process plugins on the TV look the same; try
+`ps -ef | grep '[W]PEProcess'`.
+
+**2. Call it.** The API is the same as HelloWorld's; only the callsign changes:
+
+```sh
+curl -s -X POST -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"HelloWorldOOP.1.sayHello","params":{"name":"Mahmoud"}}' \
+  http://127.0.0.1:9998/jsonrpc
+```
+
+Expected: `{"jsonrpc":"2.0","id":2,"result":{"message":"Hello, Mahmoud!","count":1,"success":true}}`.
+`getGreeting`, `setGreeting` and the `onGreeted` event (Stop 14) work the same
+way.
+
+**3. See the two processes:**
+
+```sh
+curl -s -X POST -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":3,"method":"HelloWorldOOP.1.getProcessInfo"}' \
+  http://127.0.0.1:9998/jsonrpc
+```
+
+Expected: two different PIDs and `"outOfProcess":true`. `pluginPid` is the PID
+of `WPEFramework` (`pidof WPEFramework`), and `implementationPid` is the
+`WPEProcess`.
+
+**4. Crash it on purpose.** This is the point of out-of-process:
+
+```sh
+kill -9 <implementationPid>
+```
+
+`WPEFramework` keeps running and every other plugin keeps working.
+`Deactivated()` sees that its process is gone and deactivates the plugin, so
+`Controller.1.status@HelloWorldOOP` now shows `deactivated`. Bring it back
+with:
+
+```sh
+curl -s -X POST -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":4,"method":"Controller.1.activate","params":{"callsign":"HelloWorldOOP"}}' \
+  http://127.0.0.1:9998/jsonrpc
+```
+
+A new `WPEProcess` starts, with a new PID. The counter starts again from 0,
+because the state lived in the process that was killed. Try the
+same `kill -9` on `WPEFramework` with in-process HelloWorld, and the whole
+TV software stack restarts.
+
+### 17.10 One code base, either mode
+
+The plugin code never says where the implementation runs. `Root<>()` decides
+from the config. Change `"mode"` in `/etc/WPEFramework/plugins/HelloWorldOOP.json`
+on the TV from `"Local"` to `"Off"` and restart `WPEFramework`:
+
+- `HelloWorldImplementation` is now loaded inside `WPEFramework`.
+- `getProcessInfo` returns the same PID twice and `"outOfProcess":false`.
+- Calls are direct C++ calls again: no proxy/stub, no socket.
+
+This is why DeviceInfo and PersistentStore on this TV have a split
+implementation but run with `"mode": "Off"`. To make the choice at build time
+instead, set `-DPLUGIN_HELLOWORLDOOP_MODE=Off` in the recipe.
+
+### 17.11 In-process or out-of-process?
+
+| Choose | When |
+|---|---|
+| In-process (Stops 5–15) | Small, well-tested code; you need the lowest latency; the plugin mostly forwards to a daemon (most `org.rdk.*` services) |
+| Out-of-process | The code is large, uses third-party libraries, or can crash or hang (browsers, players, DTV); you want to limit its memory or restart it on its own |
+| Split, but `"mode": "Off"` | You are not sure yet. Write it out-of-process-ready and decide in the config |
+
+Rules that apply to every out-of-process plugin:
+
+- **Every call can fail.** If the `WPEProcess` dies, calls on the proxy return
+  an error instead of crashing. Check the return codes.
+- **Calls cost more.** Each call is a message across a socket. Prefer one call
+  that does a lot over many small ones.
+- **Never call out while holding a lock.** A callback can arrive on another
+  thread while you wait.
+- **Plan for the process to die.** Handle `Deactivated()` as in 17.5.
+
+---
+
+## Stop 18: where to go next
+
+You now know both kinds of plugin. Real plugins in this tree add the following:
 
 ```mermaid
 flowchart LR
     H[HelloWorld<br/>in-process, JsonObject] --> T["Typed JSON-RPC<br/>JsonGenerator from a .json API spec"]
-    T --> I["COM-RPC interface<br/>interfaces/IMyThing.h"]
-    I --> O["Out-of-process implementation<br/>like SystemControl"]
+    H --> O["HelloWorldOOP<br/>out-of-process, COM-RPC (Stop 17)"]
+    O --> I["Shared interface<br/>in wpeframework-interfaces"]
     H --> X["Call other plugins<br/>JSONRPC::LinkType or IShell::QueryInterfaceByCallsign"]
     H --> R["Talk to RDK daemons<br/>IARM bus, like org.rdk.System"]
 ```
@@ -1067,8 +2063,7 @@ flowchart LR
 | Next step | What changes | Example in this tree |
 |---|---|---|
 | Typed API | Describe methods in a JSON spec; JsonGenerator creates typed classes such as `JsonData::SystemControl::…` | `wpeframework-interfaces`, `DTV.json` |
-| COM-RPC interface | A C++ interface (`Exchange::ISystemControl`) that other plugins and processes can call directly | `systemcontrol_git.bb` |
-| Out-of-process | The plugin class becomes a thin proxy; the work runs in `WPEProcess` (`"mode": "Local"` in the config) | SystemControl (`SystemControl.cpp` + `SystemControlImpl.cpp`) |
+| Shared interface | Move `IHelloWorld.h` into `wpeframework-interfaces` with an ID from `Ids.h`, so other components can use it and its proxy/stubs ship with the rest | `Exchange::ISystemControl`, `Exchange::IDTV` |
 | IARM bus | Call `dsMgr`, `pwrMgr` and other daemons | `org.rdk.System`, `org.rdk.DisplaySettings` in `rdkservices` |
 
 A good exercise: change HelloWorld so that `sayHello` also returns the TV's power
@@ -1090,3 +2085,11 @@ state by calling `org.rdk.System.1.getDevicePowerState` from inside the plugin.
 | Subsystem | A system-wide condition such as `PLATFORM` or `NETWORK`, used for preconditions |
 | Event / notification | A message a plugin sends to clients that registered for it |
 | ConfigGenerator | The build tool that turns `<Plugin>.conf.in` into `<Plugin>.json` |
+| In-process | The plugin's code runs inside the `WPEFramework` process |
+| Out-of-process | The plugin's implementation runs in a separate `WPEProcess`, and the plugin reaches it over COM-RPC |
+| `WPEProcess` | The host process `WPEFramework` starts for an out-of-process implementation (`"mode": "Local"`) |
+| `root` (config) | The part of a plugin's `configuration` that says where `IShell::Root<>()` creates the implementation: `mode` and `locator` |
+| `IShell::Root<>()` | Creates the implementation object, in-process or in a `WPEProcess` depending on `root.mode`, and returns an interface to it |
+| Interface ID | The unique number (`enum { ID = … }`) that identifies a COM-RPC interface on the wire |
+| Proxy / stub | Generated code. The proxy turns interface calls into COM-RPC messages; the stub, in the other process, turns them back into calls |
+| ProxyStubGenerator | The build tool that generates the proxy/stub code from an interface header |
